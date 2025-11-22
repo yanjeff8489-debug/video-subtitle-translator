@@ -1,0 +1,45 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+
+    - name: Build EXE
+      run: |
+        pyinstaller --noconsole --onefile --icon=translation_icon.ico ^
+          --add-data "ffmpeg.exe;." ^
+          --add-data "ffprobe.exe;." ^
+          video_to_bilingual_gui.py
+
+    - name: Upload EXE as Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: subtitle-tool-exe
+        path: dist/video_to_bilingual_gui.exe
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: dist/video_to_bilingual_gui.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
