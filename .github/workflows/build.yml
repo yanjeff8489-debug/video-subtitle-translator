@@ -2,7 +2,7 @@ name: Build Windows EXE
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
@@ -23,6 +23,14 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install pyinstaller
+
+    - name: Download ffmpeg
+      run: |
+        curl -L -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+        powershell -command "Expand-Archive ffmpeg.zip -DestinationPath ."
+        for /d %%i in (ffmpeg-* ) do set folder=%%i
+        copy "%folder%\bin\ffmpeg.exe" .
+        copy "%folder%\bin\ffprobe.exe" .
 
     - name: Build EXE
       run: |
