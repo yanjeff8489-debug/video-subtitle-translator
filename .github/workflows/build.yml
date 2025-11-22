@@ -36,10 +36,7 @@ jobs:
 
     - name: Build EXE
       run: |
-        pyinstaller --noconsole --onefile --icon=translation_icon.ico ^
-          --add-data "ffmpeg.exe;." ^
-          --add-data "ffprobe.exe;." ^
-          video_to_bilingual_gui.py
+        pyinstaller --noconsole --onefile --icon=translation_icon.ico --add-data "ffmpeg.exe;." --add-data "ffprobe.exe;." video_to_bilingual_gui.py
 
     - name: Upload EXE as Artifact
       uses: actions/upload-artifact@v4
