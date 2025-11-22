@@ -27,10 +27,12 @@ jobs:
     - name: Download ffmpeg
       run: |
         curl -L -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
-        powershell -command "Expand-Archive ffmpeg.zip -DestinationPath ."
-        for /d %%i in (ffmpeg-* ) do set folder=%%i
-        copy "%folder%\bin\ffmpeg.exe" .
-        copy "%folder%\bin\ffprobe.exe" .
+        Expand-Archive ffmpeg.zip -DestinationPath .
+
+        $folder = Get-ChildItem -Directory | Where-Object { $_.Name -like "ffmpeg-*" } | Select-Object -First 1
+        Copy-Item "$($folder.FullName)\bin\ffmpeg.exe" .
+        Copy-Item "$($folder.FullName)\bin\ffprobe.exe" .
+
 
     - name: Build EXE
       run: |
