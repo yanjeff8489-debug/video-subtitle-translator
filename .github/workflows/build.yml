@@ -40,13 +40,13 @@ jobs:
           video_to_bilingual_gui.py
 
     - name: Upload EXE as Artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: subtitle-tool-exe
         path: dist/video_to_bilingual_gui.exe
 
     - name: Create Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: dist/video_to_bilingual_gui.exe
       env:
