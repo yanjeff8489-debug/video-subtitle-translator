@@ -9,6 +9,10 @@ jobs:
   build:
     runs-on: windows-latest
 
+    defaults:
+      run:
+        shell: cmd
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
@@ -27,16 +31,21 @@ jobs:
     - name: Download ffmpeg
       run: |
         curl -L -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
-        Expand-Archive ffmpeg.zip -DestinationPath .
-
-        $folder = Get-ChildItem -Directory | Where-Object { $_.Name -like "ffmpeg-*" } | Select-Object -First 1
-        Copy-Item "$($folder.FullName)\bin\ffmpeg.exe" .
-        Copy-Item "$($folder.FullName)\bin\ffprobe.exe" .
-
+        powershell Expand-Archive ffmpeg.zip -DestinationPath .
+        for /D %%i in (ffmpeg-*) do (
+            copy "%%i\bin\ffmpeg.exe" .
+            copy "%%i\bin\ffprobe.exe" .
+        )
 
     - name: Build EXE
       run: |
-        pyinstaller --noconsole --onefile --icon=translation_icon.ico --add-data "ffmpeg.exe;." --add-data "ffprobe.exe;." video_to_bilingual_gui.py
+        pyinstaller ^
+          --noconsole ^
+          --onefile ^
+          --icon=translation_icon.ico ^
+          --add-data "ffmpeg.exe;." ^
+          --add-data "ffprobe.exe;." ^
+          video_to_bilingual_gui.py
 
     - name: Upload EXE as Artifact
       uses: actions/upload-artifact@v4
