@@ -1,96 +1,209 @@
 import os
+import threading
 import subprocess
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, ttk, messagebox
 from faster_whisper import WhisperModel
-from datetime import timedelta
 from googletrans import Translator
 
-MODEL_SIZE = "small"
-SAMPLE_RATE = 16000
-LANG_SOURCE = "de"
-LANG_TARGET = "zh-cn"
 
-def srt_timestamp(seconds):
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds - int(seconds)) * 1000)
-    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+# -------------------------
+# Global Translator
+# -------------------------
+translator = Translator()
 
+
+# -------------------------
+# Load Whisper model (user chooses model directory)
+# -------------------------
+def load_model():
+    status_label.config(text="请选择 Whisper 模型文件夹（small 或 medium）…")
+    window.update()
+
+    model_dir = filedialog.askdirectory(title="请选择模型文件夹")
+    if not model_dir:
+        status_label.config(text="未选择模型，操作取消")
+        return None
+
+    status_label.config(text="正在加载模型，请稍候…（可能需要 10~30 秒）")
+    window.update()
+
+    try:
+        model = WhisperModel(
+            model_dir,
+            device="cpu",
+            compute_type="float32"  # 保持原始精度
+        )
+        status_label.config(text="模型加载成功！")
+        return model
+
+    except Exception as e:
+        messagebox.showerror("错误", f"模型加载失败：\n{e}")
+        status_label.config(text="模型加载失败")
+        return None
+
+
+# -------------------------
+# FFMPEG extract audio
+# -------------------------
 def extract_audio(video_path):
-    audio_path = video_path + ".wav"
+    status_label.config(text="正在提取音频…")
+    window.update()
+
+    audio_path = video_path + "_audio.wav"
+    ffmpeg_path = "ffmpeg.exe"
+
     cmd = [
-        "ffmpeg", "-y",
+        ffmpeg_path,
         "-i", video_path,
+        "-vn",
         "-ac", "1",
-        "-ar", str(SAMPLE_RATE),
-        audio_path
+        "-ar", "16000",
+        "-y", audio_path
     ]
-    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    try:
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False)
+    except Exception as e:
+        messagebox.showerror("错误", f"执行 ffmpeg 时出错：\n{e}")
+        return None
+
     return audio_path
 
-def process_video(video_path, status_label):
-    status_label.config(text="正在加载模型，请稍候...")
+
+# -------------------------
+# Write bilingual subtitles
+# -------------------------
+def write_srt(output_path, segments):
+    status_label.config(text="正在生成双语字幕…")
     window.update()
 
-    model = WhisperModel(MODEL_SIZE, device="cpu")
-    translator = Translator()
+    with open(output_path, "w", encoding="utf-8") as f:
+        idx = 1
+        for seg in segments:
+            start = seg.start
+            end = seg.end
+            text = seg.text.strip()
 
-    status_label.config(text="正在提取音频...")
-    window.update()
-    audio_path = extract_audio(video_path)
+            start_time = format_timestamp(start)
+            end_time = format_timestamp(end)
 
-    status_label.config(text="正在识别音频中...")
-    window.update()
-    segments, _ = model.transcribe(audio_path, beam_size=5, language=LANG_SOURCE)
-
-    base_name = os.path.splitext(video_path)[0]
-    srt_path = base_name + ".srt"
-
-    status_label.config(text="正在翻译并生成字幕...")
-    window.update()
-
-    with open(srt_path, "w", encoding="utf-8") as f:
-        for i, seg in enumerate(segments, 1):
-            start = srt_timestamp(seg.start)
-            end = srt_timestamp(seg.end)
-            orig = seg.text.strip()
             try:
-                zh = translator.translate(orig, src=LANG_SOURCE, dest=LANG_TARGET).text
+                zh = translator.translate(text, dest="zh-cn").text
             except:
-                zh = ""
+                zh = "【翻译失败】" + text
 
-            f.write(f"{i}\n")
-            f.write(f"{start} --> {end}\n")
-            f.write(orig + "\n")
-            f.write(zh + "\n\n")
+            f.write(f"{idx}\n")
+            f.write(f"{start_time} --> {end_time}\n")
+            f.write(f"{text}\n{zh}\n\n")
+            idx += 1
 
-    status_label.config(text="处理完成！")
-    messagebox.showinfo("完成", f"字幕已生成：\n{srt_path}")
 
+def format_timestamp(seconds):
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
+
+
+# -------------------------
+# Main processing
+# -------------------------
+def process_video(video_path):
+    # Load model
+    model = load_model()
+    if model is None:
+        return
+
+    # Extract audio
+    audio_path = extract_audio(video_path)
+    if audio_path is None:
+        return
+
+    # Get selected language
+    lang_mode = language_var.get()
+    if lang_mode == "auto":
+        language = None
+        status_label.config(text="正在识别语音（自动检测语言）…")
+    else:
+        language = lang_mode
+        status_label.config(text=f"正在识别语音（指定语言：{lang_mode}）…")
+
+    window.update()
+
+    # Whisper transcription
+    segments, info = model.transcribe(
+        audio_path,
+        beam_size=5,
+        language=language
+    )
+    segments = list(segments)
+
+    # Write subtitles
+    output_srt = video_path + "_bilingual.srt"
+    write_srt(output_srt, segments)
+
+    status_label.config(text=f"字幕生成完成：\n{output_srt}")
+    messagebox.showinfo("完成", f"已生成双语字幕：\n{output_srt}")
+
+
+# -------------------------
+# Run in thread
+# -------------------------
+def process_video_thread(video_path):
+    thread = threading.Thread(target=process_video, args=(video_path,), daemon=True)
+    thread.start()
+
+
+# -------------------------
+# Button callback
+# -------------------------
 def choose_video():
     video_path = filedialog.askopenfilename(
         title="选择视频文件",
-        filetypes=[("Video files", "*.mp4 *.mkv *.mov *.avi")]
+        filetypes=[("Video Files", "*.mp4;*.mkv;*.avi;*.mov")]
     )
     if video_path:
-        status_label.config(text="开始处理...")
-        process_video(video_path, status_label)
+        status_label.config(text="开始处理视频…")
+        process_video_thread(video_path)
 
-# GUI ------------------------
 
+# -------------------------
+# GUI
+# -------------------------
 window = tk.Tk()
-window.title("德语 → 中文 双语字幕生成器")
-window.geometry("420x200")
+window.title("视频转文字并生成双语字幕（Whisper）")
+window.geometry("620x380")
 
-label = tk.Label(window, text="请选择要处理的视频文件：", font=("Arial", 12))
-label.pack(pady=10)
+# 语言选择框（包括芬兰语、日语）
+tk.Label(window, text="选择识别语言：", font=("Microsoft YaHei", 12)).pack()
 
-btn = tk.Button(window, text="选择视频", font=("Arial", 14), command=choose_video)
-btn.pack(pady=10)
+language_var = tk.StringVar()
+language_dropdown = ttk.Combobox(
+    window,
+    textvariable=language_var,
+    values=[
+        ("auto"),   # 自动检测
+        ("de"),     # 德语
+        ("en"),     # 英语
+        ("zh"),     # 中文
+        ("fr"),     # 法语
+        ("es"),     # 西班牙语
+        ("fi"),     # 芬兰语
+        ("ja")      # 日语
+    ],
+    state="readonly",
+    font=("Microsoft YaHei", 12),
+    width=20
+)
+language_dropdown.pack(pady=5)
+language_dropdown.current(0)   # 默认自动检测
 
-status_label = tk.Label(window, text="", font=("Arial", 11))
-status_label.pack(pady=10)
+# 视频选择按钮
+choose_btn = tk.Button(window, text="选择视频文件", font=("Microsoft YaHei", 16), command=choose_video)
+choose_btn.pack(pady=20)
+
+status_label = tk.Label(window, text="准备就绪", font=("Microsoft YaHei", 12), wraplength=580)
+status_label.pack(pady=20)
 
 window.mainloop()
