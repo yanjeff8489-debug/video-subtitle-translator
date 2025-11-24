@@ -1,3 +1,5 @@
 faster-whisper
-googletrans==4.0.0rc1
-deepl
+openai==1.0.0
+configparser==5.4.0
+# tkinter 是 Python 标准库，不需要 pip 安装
+
