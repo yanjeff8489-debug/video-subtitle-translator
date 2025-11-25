@@ -356,6 +356,10 @@ def on_set_api_key():
         else:
             messagebox.showwarning("注意", f"API Key 已保存，但初始化失败：{err}")
 
+def status(msg: str):
+    status_label.config(text=msg)
+    window.update_idletasks()
+
 # -------------------------
 # GUI layout (with single bottom progress bar)
 # -------------------------
@@ -404,3 +408,4 @@ else:
     status("已检测到 API Key（可直接开始）")
 
 window.mainloop()
+
