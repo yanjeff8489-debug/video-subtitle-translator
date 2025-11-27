@@ -170,7 +170,7 @@ def translate_batch_with_context(texts: List[str], max_batch_chars=2000) -> List
         )
         try:
             resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4o",
                 messages=[
                     {"role": "system", "content": prompt_system},
                     {"role": "user", "content": merged}
@@ -211,7 +211,7 @@ def _translate_single_retry(text, retries=3, backoff=1.2):
     for attempt in range(retries):
         try:
             resp = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4o",
                 messages=[{"role":"system","content":sys_prompt}, {"role":"user","content":text}],
                 temperature=0.15,
                 max_tokens=1000
@@ -311,7 +311,7 @@ def process_video_flow(video_path):
         originals = [s.text.strip() for s in segments]
         total = len(originals)
         set_progress_max(total)
-        status(f"识别完成，共 {total} 段。开始批量上下文翻译（gpt-4o-mini）...")
+        status(f"识别完成，共 {total} 段。开始批量上下文翻译（gpt-4o）...")
         window.update()
 
         translations = translate_batch_with_context(originals, max_batch_chars=1800)
@@ -364,7 +364,7 @@ def status(msg: str):
 # GUI layout (with single bottom progress bar)
 # -------------------------
 window = tk.Tk()
-window.title("字幕工具 — Whisper + gpt-4o-mini 翻译（进度条底部）")
+window.title("字幕工具 — Whisper + gpt-4o 翻译（进度条底部）")
 window.geometry("760x460")
 
 top_frame = tk.Frame(window)
@@ -408,4 +408,5 @@ else:
     status("已检测到 API Key（可直接开始）")
 
 window.mainloop()
+
 
