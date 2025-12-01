@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Whisper + gpt-4o-mini 翻译（上下文批量）+ GUI API Key 设置 + 底部单一进度条
+Whisper + 翻译引擎（DeepL / gpt-4o-mini）+ GUI API Key 设置 + 底部进度条
 保存为 video_to_bilingual_gui.py
 """
 
@@ -15,61 +15,111 @@ import configparser
 import tkinter as tk
 import tkinter.simpledialog as simpledialog
 from tkinter import filedialog, ttk, messagebox
-from typing import List
+from typing import List, Optional
 
+# speech recognition
 from faster_whisper import WhisperModel
+
+# OpenAI client (for gpt-4o-mini)
 from openai import OpenAI
+
+# DeepL SDK
+try:
+    import deepl
+except Exception:
+    deepl = None  # will handle at runtime
 
 # -------------------------
 # app base dir & config
 # -------------------------
 def app_base_dir():
     if getattr(sys, "frozen", False):
-        # exe 模式：config 放在 exe 同目录
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_FILE = os.path.join(app_base_dir(), "config.ini")
 
 # -------------------------
-# read/write API key
+# read/write API keys (both OpenAI & DeepL)
 # -------------------------
-def load_api_key():
+def load_config():
     cfg = configparser.ConfigParser()
     if not os.path.exists(CONFIG_FILE):
-        return None
+        return {}
     try:
         cfg.read(CONFIG_FILE, encoding="utf-8")
-        return cfg.get("openai", "api_key", fallback=None)
+        result = {}
+        if cfg.has_section("openai"):
+            result["openai_api_key"] = cfg.get("openai", "api_key", fallback=None)
+        if cfg.has_section("deepl"):
+            result["deepl_api_key"] = cfg.get("deepl", "api_key", fallback=None)
+        return result
     except Exception:
-        return None
+        return {}
 
-def save_api_key(key: str):
+def save_openai_key(key: str):
     cfg = configparser.ConfigParser()
-    cfg["openai"] = {"api_key": key}
+    if os.path.exists(CONFIG_FILE):
+        cfg.read(CONFIG_FILE, encoding="utf-8")
+    if not cfg.has_section("openai"):
+        cfg.add_section("openai")
+    cfg.set("openai", "api_key", key)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         cfg.write(f)
 
-def ask_and_save_api_key():
-    key = simpledialog.askstring("设置 OpenAI API Key", "请输入你的 OpenAI API Key（sk-...）:", show="*")
-    if key:
-        save_api_key(key.strip())
-        messagebox.showinfo("已保存", "API Key 已保存到 config.ini（程序目录）。")
-        return key.strip()
-    return None
+def save_deepl_key(key: str):
+    cfg = configparser.ConfigParser()
+    if os.path.exists(CONFIG_FILE):
+        cfg.read(CONFIG_FILE, encoding="utf-8")
+    if not cfg.has_section("deepl"):
+        cfg.add_section("deepl")
+    cfg.set("deepl", "api_key", key)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        cfg.write(f)
 
 # -------------------------
-# OpenAI init (lazy)
+# status helper (must be defined before calls)
 # -------------------------
-openai_client = None
+def status(msg: str):
+    try:
+        status_label.config(text=msg)
+        window.update_idletasks()
+    except Exception:
+        # if UI not ready, just print
+        print("STATUS:", msg)
+
+# -------------------------
+# OpenAI client (lazy init)
+# -------------------------
+openai_client: Optional[OpenAI] = None
 
 def init_openai_client():
     global openai_client
-    key = load_api_key()
+    cfg = load_config()
+    key = cfg.get("openai_api_key")
     if not key:
-        return False, "未配置 API Key"
+        return False, "未配置 OpenAI API Key"
     try:
         openai_client = OpenAI(api_key=key)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+# -------------------------
+# DeepL client (lazy init)
+# -------------------------
+deepl_client = None
+
+def init_deepl_client():
+    global deepl_client
+    if deepl is None:
+        return False, "deepl SDK 未安装，请 pip install deepl"
+    cfg = load_config()
+    key = cfg.get("deepl_api_key")
+    if not key:
+        return False, "未配置 DeepL API Key"
+    try:
+        deepl_client = deepl.Translator(key)
         return True, None
     except Exception as e:
         return False, str(e)
@@ -78,17 +128,14 @@ def init_openai_client():
 # ffmpeg helper (PyInstaller safe)
 # -------------------------
 def get_ffmpeg_path():
-    # first try _MEIPASS (onefile)
     if hasattr(sys, "_MEIPASS"):
         candidate = os.path.join(sys._MEIPASS, "ffmpeg.exe")
         if os.path.exists(candidate):
             return candidate
-    # try exe dir
-    exe_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.getcwd()
+    exe_dir = os.path.dirname(sys.executable) if getattr(sys,"frozen",False) else os.getcwd()
     candidate2 = os.path.join(exe_dir, "ffmpeg.exe")
     if os.path.exists(candidate2):
         return candidate2
-    # fallback to PATH name
     return "ffmpeg.exe"
 
 # -------------------------
@@ -132,59 +179,76 @@ def extract_audio(video_path):
         return None
 
 # -------------------------
-# translate helpers (gpt-4o-mini)
+# translate helpers
 # -------------------------
 
-def translate_batch_with_context(texts: List[str], max_batch_chars=2000) -> List[str]:
-    """
-    更智能的上下文批量翻译策略：
-    - 合并相邻短段成上下文块，但每个块字符数不超过 max_batch_chars
-    - 对每个块发一次请求，要求返回 JSON 列表（对应每个子句）
-    - 解析失败则回退到逐句翻译
-    """
-    if openai_client is None:
-        return ["【未配置 API Key】" + t for t in texts]
+# --- DeepL batch translate (sequential with retries, updates progress) ---
+def translate_with_deepl_batch(texts: List[str], target_lang="ZH", retries=3, sleep_between=0.1) -> List[str]:
+    ok, err = init_deepl_client()
+    if not ok:
+        return ["【DeepL 未配置】" for _ in texts]
+    global deepl_client
+    results = []
+    total = len(texts)
+    done = 0
+    for t in texts:
+        attempt = 0
+        translated = None
+        while attempt < retries:
+            try:
+                # DeepL Translator.translate_text returns a Text object with .text
+                res = deepl_client.translate_text(t, target_lang=target_lang)
+                translated = res.text
+                break
+            except Exception as e:
+                attempt += 1
+                time.sleep(0.5 * attempt)
+        if translated is None:
+            translated = "【翻译失败】" + t
+        results.append(translated)
+        done += 1
+        update_translation_progress(done)
+        # small pause to avoid rate limit bursts
+        time.sleep(sleep_between)
+    return results
 
+# --- OpenAI gpt-4o-mini batch (existing approach) ---
+def translate_batch_with_context_gpt(texts: List[str], max_batch_chars=2000) -> List[str]:
+    if openai_client is None:
+        return ["【未配置 OpenAI Key】" for _ in texts]
     results = []
     n = len(texts)
     i = 0
     while i < n:
-        # build a chunk
         chunk_texts = []
         chunk_chars = 0
         while i < n and (chunk_chars + len(texts[i])) <= max_batch_chars and len(chunk_texts) < 20:
             chunk_texts.append(texts[i])
             chunk_chars += len(texts[i])
             i += 1
-        # if nothing collected (one very large sentence), force one
         if not chunk_texts:
-            chunk_texts.append(texts[i])
-            i += 1
-
-        # merge chunk with separator and ask model to return JSON array
+            chunk_texts.append(texts[i]); i+=1
         sep = "\n<<SPLIT>>\n"
         merged = sep.join(chunk_texts)
         prompt_system = (
             "你是一名专业的视频字幕翻译员。下面是多条需要翻译的句子，请按原顺序把每一条翻译成自然、流畅、简体中文。"
-            "  返回严格的 JSON 数组，不要多说话，数组中每个元素对应一条翻译文本。"
+            "返回严格的 JSON 数组，不要多说话，数组中每个元素对应一条翻译文本。"
         )
         try:
             resp = openai_client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": prompt_system},
                     {"role": "user", "content": merged}
                 ],
-                temperature=0.15,
+                temperature=0.12,
                 max_tokens=4000
             )
             out = resp.choices[0].message.content.strip()
-            # try parse JSON
             parsed = None
             try:
                 parsed = json.loads(out)
             except Exception:
-                # try to extract last JSON in text (some models prepend explanation)
                 try:
                     jstart = out.rfind('[')
                     parsed = json.loads(out[jstart:])
@@ -193,45 +257,41 @@ def translate_batch_with_context(texts: List[str], max_batch_chars=2000) -> List
             if isinstance(parsed, list) and len(parsed) == len(chunk_texts):
                 results.extend(parsed)
             else:
-                # fallback: per-sentence
                 for s in chunk_texts:
                     results.append(_translate_single_retry(s))
         except Exception:
-            # batch request failed, fallback
             for s in chunk_texts:
                 results.append(_translate_single_retry(s))
-        # update progress in GUI per-chunk
         update_translation_progress(len(results))
     return results
 
 def _translate_single_retry(text, retries=3, backoff=1.2):
     if openai_client is None:
-        return "【未配置 API Key】" + text
+        return "【未配置 OpenAI Key】" + text
     sys_prompt = "你是一名专业的视频字幕翻译员，请把下面文本翻译为自然、流畅的简体中文。"
     for attempt in range(retries):
         try:
             resp = openai_client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-mini",
                 messages=[{"role":"system","content":sys_prompt}, {"role":"user","content":text}],
-                temperature=0.15,
+                temperature=0.12,
                 max_tokens=1000
             )
             return resp.choices[0].message.content.strip()
         except Exception:
             time.sleep(backoff ** attempt)
-            continue
     return "【翻译失败】" + text
 
 # -------------------------
 # SRT write
 # -------------------------
-def format_timestamp(seconds):
+def format_timestamp(seconds: float) -> str:
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = seconds % 60
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
 
-def write_srt_bilingual(out_path, segments, translations):
+def write_srt_bilingual(out_path: str, segments, translations):
     status("正在写入 SRT 文件...")
     window.update()
     with open(out_path, "w", encoding="utf-8") as f:
@@ -259,7 +319,6 @@ def update_progress_step(step=1):
     progress_bar.update_idletasks()
 
 def update_translation_progress(done_count):
-    # called by batch translate to update progress
     progress_bar['value'] = min(done_count, progress_bar['maximum'])
     progress_bar.update_idletasks()
 
@@ -268,12 +327,22 @@ def update_translation_progress(done_count):
 # -------------------------
 def process_video_flow(video_path):
     try:
-        ok, err = init_openai_client()
-        if not ok:
-            messagebox.showwarning("API Key 问题", "请先设置 OpenAI API Key")
-            status("未配置 API Key")
-            return
+        # ensure user chose engine and keys
+        engine = engine_var.get()  # "DeepL" or "ChatGPT"
+        if engine == "DeepL":
+            ok, err = init_deepl_client()
+            if not ok:
+                messagebox.showwarning("DeepL Key 问题", f"DeepL 未配置或初始化失败：{err}")
+                status("DeepL 未配置")
+                return
+        else:
+            ok, err = init_openai_client()
+            if not ok:
+                messagebox.showwarning("OpenAI Key 问题", f"OpenAI 未配置或初始化失败：{err}")
+                status("OpenAI 未配置")
+                return
 
+        # choose model dir
         model_dir = choose_model_dir()
         if not model_dir:
             status("未选择模型")
@@ -282,11 +351,12 @@ def process_video_flow(video_path):
         if model is None:
             return
 
+        # extract audio
         audio = extract_audio(video_path)
         if not audio:
             return
 
-        # recognition stage (indeterminate)
+        # recognition
         status("正在识别语音（Whisper）…")
         progress_bar['mode'] = 'indeterminate'
         progress_bar.start(10)
@@ -311,14 +381,22 @@ def process_video_flow(video_path):
         originals = [s.text.strip() for s in segments]
         total = len(originals)
         set_progress_max(total)
-        status(f"识别完成，共 {total} 段。开始批量上下文翻译（gpt-4o）...")
+        status(f"识别完成，共 {total} 段。开始翻译（{engine}）...")
         window.update()
 
-        translations = translate_batch_with_context(originals, max_batch_chars=1800)
+        # translate according to engine selected
+        if engine == "DeepL":
+            translations = translate_with_deepl_batch(originals, target_lang="ZH", retries=3, sleep_between=0.08)
+        else:
+            # ChatGPT gpt-4o-mini
+            ok, err = init_openai_client()
+            if not ok:
+                messagebox.showwarning("OpenAI Key 问题", f"OpenAI 未配置或初始化失败：{err}")
+                status("OpenAI 未配置")
+                return
+            translations = translate_batch_with_context_gpt(originals, max_batch_chars=1800)
 
-        # ensure translations length matches
         if len(translations) < total:
-            # pad failures
             translations += ["【翻译失败】"] * (total - len(translations))
 
         out_srt = os.path.splitext(video_path)[0] + "_bilingual.srt"
@@ -345,33 +423,52 @@ def choose_video_and_start():
         status("准备开始...")
         start_thread_for_video(path)
 
-def on_set_api_key():
+def on_set_openai_key():
     k = simpledialog.askstring("设置 OpenAI API Key", "请输入 OpenAI API Key（sk-...）:", show="*")
     if k:
-        save_api_key(k.strip())
+        save_openai_key(k.strip())
         ok, err = init_openai_client()
         if ok:
-            messagebox.showinfo("成功", "API Key 已保存并初始化成功。")
-            status("API Key 已配置")
+            messagebox.showinfo("成功", "OpenAI API Key 已保存并初始化成功。")
+            status("OpenAI Key 已配置")
         else:
-            messagebox.showwarning("注意", f"API Key 已保存，但初始化失败：{err}")
+            messagebox.showwarning("注意", f"OpenAI Key 已保存，但初始化失败：{err}")
 
-def status(msg: str):
-    status_label.config(text=msg)
-    window.update_idletasks()
+def on_set_deepl_key():
+    k = simpledialog.askstring("设置 DeepL API Key", "请输入 DeepL API Key（Auth Key）:", show="*")
+    if k:
+        save_deepl_key(k.strip())
+        ok, err = init_deepl_client()
+        if ok:
+            messagebox.showinfo("成功", "DeepL API Key 已保存并初始化成功。")
+            status("DeepL Key 已配置")
+        else:
+            messagebox.showwarning("注意", f"DeepL Key 已保存，但初始化失败：{err}")
 
 # -------------------------
 # GUI layout (with single bottom progress bar)
 # -------------------------
 window = tk.Tk()
-window.title("字幕工具 — Whisper + gpt-4o 翻译（进度条底部）")
-window.geometry("760x460")
+window.title("字幕工具 — Whisper + DeepL/gpt-4o-mini 翻译")
+window.geometry("820x520")
 
+# top: API key buttons
 top_frame = tk.Frame(window)
 top_frame.pack(pady=8)
-tk.Button(top_frame, text="设置 API Key", command=on_set_api_key, font=("Microsoft YaHei", 10)).pack(side="left", padx=6)
+tk.Button(top_frame, text="设置 OpenAI API Key", command=on_set_openai_key, font=("Microsoft YaHei", 10)).pack(side="left", padx=6)
+tk.Button(top_frame, text="设置 DeepL API Key", command=on_set_deepl_key, font=("Microsoft YaHei", 10)).pack(side="left", padx=6)
 tk.Button(top_frame, text="打开 config.ini", command=lambda: os.startfile(CONFIG_FILE) if os.path.exists(CONFIG_FILE) else messagebox.showinfo("提示","config.ini 不存在"), font=("Microsoft YaHei", 10)).pack(side="left", padx=6)
 
+# engine selection (no auto-switch)
+engine_frame = tk.Frame(window)
+engine_frame.pack(pady=6)
+tk.Label(engine_frame, text="选择翻译引擎（不自动切换）：", font=("Microsoft YaHei", 12)).pack(side="left")
+engine_var = tk.StringVar(value="DeepL")
+engine_box = ttk.Combobox(engine_frame, textvariable=engine_var, state="readonly", width=16,
+                          values=["DeepL", "ChatGPT (gpt-4o-mini)"])
+engine_box.pack(side="left", padx=6)
+
+# language selection
 lang_frame = tk.Frame(window)
 lang_frame.pack(pady=6)
 tk.Label(lang_frame, text="识别语言：", font=("Microsoft YaHei", 12)).pack(side="left")
@@ -380,33 +477,43 @@ language_box = ttk.Combobox(lang_frame, textvariable=language_var, state="readon
                            values=["auto","de","en","zh","fr","es","fi","ja"])
 language_box.pack(side="left", padx=6)
 
+# center: choose video and start
 center = tk.Frame(window)
 center.pack(pady=20)
-tk.Button(center, text="选择视频并开始", command=choose_video_and_start, font=("Microsoft YaHei", 14), width=24).pack()
+tk.Button(center, text="选择视频并开始", command=choose_video_and_start, font=("Microsoft YaHei", 14), width=28).pack()
 
-status_label = tk.Label(window, text="准备就绪", font=("Microsoft YaHei", 11), wraplength=720, justify="left")
+# status label
+status_label = tk.Label(window, text="准备就绪", font=("Microsoft YaHei", 11), wraplength=780, justify="left")
 status_label.pack(pady=8)
 
-# bottom single progress bar (Option 1)
-progress_bar = ttk.Progressbar(window, orient="horizontal", length=700, mode="determinate")
+# bottom single progress bar
+progress_bar = ttk.Progressbar(window, orient="horizontal", length=780, mode="determinate")
 progress_bar.pack(pady=10)
 
+# help text
 help_text = (
     "说明：\n"
-    "1) 首次使用请点击“设置 API Key”并输入你的 OpenAI API Key。\n"
+    "1) 首次使用请点击“设置 DeepL API Key”或“设置 OpenAI API Key”。\n"
     "2) 运行时会提示选择 Whisper 模型目录（如 small / medium）。\n"
-    "3) 请确保 ffmpeg.exe 与 EXE 同目录，或已在 PATH 中。\n"
+    "3) 若使用 DeepL，请确保你的 DeepL Key 有权限调用 API（Auth Key）。\n"
     "4) 程序会输出 *_bilingual.srt 文件（原文 + 中文）。"
 )
 tk.Label(window, text=help_text, font=("Microsoft YaHei", 10), fg="#333", justify="left").pack(padx=12)
 
-# initialize
-_init_ok, _err = init_openai_client()
-if not _init_ok:
-    status("未检测到 API Key，请点击“设置 API Key”")
-else:
-    status("已检测到 API Key（可直接开始）")
+# initialize clients (if keys present)
+cfg = load_config()
+if cfg.get("openai_api_key"):
+    try:
+        init_openai_client()
+    except:
+        pass
+if cfg.get("deepl_api_key"):
+    try:
+        init_deepl_client()
+    except:
+        pass
+
+if not cfg:
+    status("未检测到 API Key，请点击“设置 DeepL API Key”或“设置 OpenAI API Key”")
 
 window.mainloop()
-
-
